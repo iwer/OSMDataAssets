@@ -1,0 +1,24 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "OSMDataAssets",
+	"Description": "Import OSM Data",
+	"Category": "Other",
+	"CreatedBy": "Iwer Petersen",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": true,
+	"IsBetaVersion": true,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "OSMDataAssets",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	]
+}
