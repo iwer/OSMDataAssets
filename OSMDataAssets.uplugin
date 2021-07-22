@@ -19,6 +19,25 @@
 			"Name": "OSMDataAssets",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "OSMDataAssetsEditor",
+			"Type": "Editor",
+			"LoadingPhase": "PostEngineInit"
 		}
+	],
+	"Plugins": [
+		{
+			"Name": "UnrealGDAL",
+			"Enabled": true
+		},
+		{
+			"Name": "GeoReference",
+			"Enabled": true
+		},
+        {
+            "Name": "SpatialGeometryTools",
+            "Enabled": true
+        }
 	]
 }

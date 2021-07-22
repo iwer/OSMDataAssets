@@ -1,6 +1,6 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "OSMDataAssets.h"
+#include "OSMDataAssetsModule.h"
 
 #define LOCTEXT_NAMESPACE "FOSMDataAssetsModule"
 
