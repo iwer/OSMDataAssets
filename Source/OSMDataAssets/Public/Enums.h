@@ -1,4 +1,5 @@
-﻿#pragma once
+﻿// Copyright (c) Iwer Petersen. All rights reserved.
+#pragma once
 
 /** Types of ways */
 //enum class EOSMWayType

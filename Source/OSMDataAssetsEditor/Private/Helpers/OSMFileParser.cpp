@@ -1,4 +1,5 @@
 // Copyright 2017 Mike Fricker. All Rights Reserved.
+// Copyright 2020 Iwer Petersen. All rights reserved.
 
 #include "OSMFileParser.h"
 
@@ -16,8 +17,8 @@ FOSMFile::~FOSMFile() {
         }
         Ways.Empty();
 
-        for (auto HashPair : NodeMap) {
-            FOSMNodeInfo * NodeInfo = HashPair.Value;
+        for (const auto &HashPair : NodeMap) {
+            const FOSMNodeInfo * NodeInfo = HashPair.Value;
             delete NodeInfo;
         }
         NodeMap.Empty();
@@ -27,12 +28,12 @@ FOSMFile::~FOSMFile() {
 
 bool FOSMFile::LoadOpenStreetMapFile(FString &OSMFilePath, const bool bIsFilePathActuallyTextBuffer,
                                      FFeedbackContext * FeedbackContext) {
-    const bool bShowSlowTaskDialog = true;
-    const bool bShowCancelButton = true;
+    constexpr bool bShowSlowTaskDialog = true;
+    constexpr bool bShowCancelButton = true;
 
     FText ErrorMessage;
     int32 ErrorLineNumber;
-    bool success = FFastXml::ParseXmlFile(
+    const bool bSuccess = FFastXml::ParseXmlFile(
             this,
             bIsFilePathActuallyTextBuffer ? nullptr : *OSMFilePath,
             bIsFilePathActuallyTextBuffer ? OSMFilePath.GetCharArray().GetData() : nullptr,
@@ -41,13 +42,13 @@ bool FOSMFile::LoadOpenStreetMapFile(FString &OSMFilePath, const bool bIsFilePat
             bShowCancelButton,
             /* Out */ ErrorMessage,
             /* Out */ ErrorLineNumber);
-    if (success) {
+    if (bSuccess) {
         if (NodeMap.Num() > 0) {
             AverageLatitude /= NodeMap.Num();
             AverageLongitude /= NodeMap.Num();
         }
 
-        return success;
+        return bSuccess;
     }
 
     if (FeedbackContext != nullptr) {
@@ -75,6 +76,7 @@ bool FOSMFile::ProcessComment(const TCHAR * Comment) {
 
 
 bool FOSMFile::ProcessElement(const TCHAR * ElementName, const TCHAR * ElementData, int32 XmlFileLineNumber) {
+    UE_LOG(LogTemp, Warning, TEXT("FOSMFile: ProcessElement: %d"), XmlFileLineNumber);
     if (ParsingState == ParsingState::Root) {
         if (!FCString::Stricmp(ElementName, TEXT("node"))) {
             ParsingState = ParsingState::Node;
@@ -96,6 +98,12 @@ bool FOSMFile::ProcessElement(const TCHAR * ElementName, const TCHAR * ElementDa
             CurrentWayInfo->Levels = 0;
             // @todo: We're currently ignoring the "visible" tag on ways, which means that roads will always
             //        be included in our data set.  It might be nice to make this an import option.
+        } else if (!FCString::Stricmp(ElementName, TEXT("relation"))) {
+            ParsingState = ParsingState::Relation;
+            CurrentRelationInfo = new FOSMRelationInfo();
+            CurrentRelationInfo->Members.Empty();
+            CurrentRelationInfo->BuildingType = EOSMBuildingType::OtherBuilding;
+            CurrentRelationInfo->BuildingLevels = 0;
         }
     } else if (ParsingState == ParsingState::Way) {
         if (!FCString::Stricmp(ElementName, TEXT("nd"))) {
@@ -103,10 +111,21 @@ bool FOSMFile::ProcessElement(const TCHAR * ElementName, const TCHAR * ElementDa
         } else if (!FCString::Stricmp(ElementName, TEXT("tag"))) {
             ParsingState = ParsingState::Way_Tag;
         }
+    } else if (ParsingState == ParsingState::Relation) {
+        if (!FCString::Stricmp(ElementName, TEXT("member"))) {
+            ParsingState = ParsingState::Rel_Member;
+            CurrentRelMember = new FOSMRelMember();
+            CurrentRelMember->Type.Empty();
+            CurrentRelMember->Ref.Empty();
+            CurrentRelMember->bIsInner = 0;
+        } else if (!FCString::Stricmp(ElementName, TEXT("tag"))) {
+            ParsingState = ParsingState::Rel_Tag;
+        }
     }
 
     return true;
 }
+
 
 
 bool FOSMFile::ProcessAttribute(const TCHAR * AttributeName, const TCHAR * AttributeValue) {
@@ -114,7 +133,7 @@ bool FOSMFile::ProcessAttribute(const TCHAR * AttributeName, const TCHAR * Attri
 
     if (ParsingState == ParsingState::Node) {
         if (!FCString::Stricmp(AttributeName, TEXT("id"))) {
-            CurrentNodeID = FPlatformString::Atoi64(AttributeValue);
+            CurrentNodeInfo->NodeID = FString(AttributeValue);
         } else if (!FCString::Stricmp(AttributeName, TEXT("lat"))) {
             CurrentNodeInfo->Latitude = FPlatformString::Atod(AttributeValue);
 
@@ -143,10 +162,12 @@ bool FOSMFile::ProcessAttribute(const TCHAR * AttributeName, const TCHAR * Attri
             }
         }
     } else if (ParsingState == ParsingState::Way) {
-        // ...
+        if (!FCString::Stricmp(AttributeName, TEXT("id"))) {
+            CurrentWayInfo->WayID = FString(AttributeValue);
+        }
     } else if (ParsingState == ParsingState::Way_NodeRef) {
         if (!FCString::Stricmp(AttributeName, TEXT("ref"))) {
-            FOSMNodeInfo * ReferencedNode = NodeMap.FindRef(FPlatformString::Atoi64(AttributeValue));
+            FOSMNodeInfo * ReferencedNode = NodeMap.FindRef(FString(AttributeValue));
             const int NewNodeIndex = CurrentWayInfo->Nodes.Num();
             CurrentWayInfo->Nodes.Add(ReferencedNode);
 
@@ -169,215 +190,15 @@ bool FOSMFile::ProcessAttribute(const TCHAR * AttributeName, const TCHAR * Attri
                 CurrentWayInfo->Ref = AttributeValue;
             }
             else if (!FCString::Stricmp(CurrentWayTagKey, TEXT("highway"))) {
-                EOSMWayType WayType = EOSMWayType::OtherRoad;
-
-                if (!FCString::Stricmp(AttributeValue, TEXT("motorway"))) {
-                    WayType = EOSMWayType::Motorway;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("motorway_link"))) {
-                    WayType = EOSMWayType::Motorway_Link;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("trunk"))) {
-                    WayType = EOSMWayType::Trunk;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("trunk_link"))) {
-                    WayType = EOSMWayType::Trunk_Link;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("primary"))) {
-                    WayType = EOSMWayType::Primary;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("primary_link"))) {
-                    WayType = EOSMWayType::Primary_Link;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("secondary"))) {
-                    WayType = EOSMWayType::Secondary;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("secondary_link"))) {
-                    WayType = EOSMWayType::Secondary_Link;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("tertiary"))) {
-                    WayType = EOSMWayType::Tertiary;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("tertiary_link"))) {
-                    WayType = EOSMWayType::Tertiary_Link;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("residential"))) {
-                    WayType = EOSMWayType::ResidentialRoad;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("service"))) {
-                    WayType = EOSMWayType::ServiceRoad;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("unclassified"))) {
-                    WayType = EOSMWayType::UnclassifiedRoad;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("living_street"))) {
-                    WayType = EOSMWayType::Living_Street;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("pedestrian"))) {
-                    WayType = EOSMWayType::Pedestrian;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("track"))) {
-                    WayType = EOSMWayType::Track;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("bus_guideway"))) {
-                    WayType = EOSMWayType::Bus_Guideway;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("raceway"))) {
-                    WayType = EOSMWayType::Raceway;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("road"))) {
-                    WayType = EOSMWayType::Road;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("footway"))) {
-                    WayType = EOSMWayType::Footway;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("cycleway"))) {
-                    WayType = EOSMWayType::Cycleway;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("bridleway"))) {
-                    WayType = EOSMWayType::Bridleway;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("steps"))) {
-                    WayType = EOSMWayType::Steps;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("path"))) {
-                    WayType = EOSMWayType::Path;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("proposed"))) {
-                    WayType = EOSMWayType::Proposed;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("construction"))) {
-                    WayType = EOSMWayType::RoadConstruction;
-                } else {
-                    // Other type that we don't recognize yet.  See http://wiki.openstreetmap.org/wiki/Key:highway
-                }
-
-
+                EOSMWayType WayType;
+                DecodeWayType(AttributeValue, WayType);
                 CurrentWayInfo->WayType = WayType;
             }
             else if (!FCString::Stricmp(CurrentWayTagKey, TEXT("building"))) {
                 CurrentWayInfo->WayType = EOSMWayType::Building;
-
-                if (!FCString::Stricmp(AttributeValue, TEXT("yes"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::OtherBuilding;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("apartments"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Apartments;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("bungalow"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Bungalow;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("cabin"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Cabin;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("detached"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Detached;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("dormitory"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Dormitory;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("farm"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Farm;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("ger"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Ger;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("hotel"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Hotel;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("house"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::House;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("houseboat"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Houseboat;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("residential"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::ResidentialBuilding;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("semidetached_house"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::SemiDetachedHouse;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("static_caravan"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::StaticCaravan;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("terrace"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Terrace;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("commercial"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::CommercialBuilding;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("industrial"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::IndustrialBuilding;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("kiosk"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Kiosk;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("office"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Office;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("retail"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Retail;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("supermarket"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Supermarket;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("warehouse"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Warehouse;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("cathedral"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Cathedral;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("chapel"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Chapel;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("church"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Church;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("mosque"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Mosque;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("religious"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Religious;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("shrine"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Shrine;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("synagogue"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Synagogue;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("temple"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Temple;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("bakehouse"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Bakehouse;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("civic"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Civic;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("fire_station"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::FireStation;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("government"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Government;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("hospital"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Hospital;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("kindergarten"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Kindergarten;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("public"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::PublicBuilding;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("school"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::School;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("toilets"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Toilets;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("train_station"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::TrainStation;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("transportation"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Transportation;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("university"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::University;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("barn"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Barn;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("conservatory"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Conservatory;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("cowshed"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Cowshed;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("farm_auxiliary"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::FarmAuxiliary;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("greenhouse"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Greenhouse;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("stable"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Stable;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("sty"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Sty;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("grandstand"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Grandstand;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("pavilion"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Pavilion;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("riding_hall"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::RidingHall;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("sports_hall"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::SportsHall;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("stadium"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Stadium;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("hangar"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Hangar;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("hut"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Hut;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("shed"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Shed;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("carport"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Carport;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("garage"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Garage;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("garages"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Garages;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("parking"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Parking;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("digester"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Digester;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("service"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::ServiceBuilding;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("transformer_tower"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::TransformerTower;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("water_tower"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::WaterTower;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("bunker"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Bunker;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("bridge"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Bridge;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("construction"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::BuildingConstruction;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("roof"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Roof;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("ruins"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::Ruins;
-                } else if (!FCString::Stricmp(AttributeValue, TEXT("tree_house"))) {
-                    CurrentWayInfo->BuildingType = EOSMBuildingType::TreeHouse;
-                } else {
-                    // Other type that we don't recognize yet.  See http://wiki.openstreetmap.org/wiki/Key:building
-                }
+                EOSMBuildingType BuildingType;
+                DecodeBuildingType(AttributeValue, BuildingType);
+                CurrentWayInfo->BuildingType = BuildingType;
             }
             else if (!FCString::Stricmp(CurrentWayTagKey, TEXT("height"))) {
                 // Check to see if there is a space character in the height value.  For now, we're looking
@@ -418,6 +239,40 @@ bool FOSMFile::ProcessAttribute(const TCHAR * AttributeName, const TCHAR * Attri
                 CurrentWayInfo->Levels = FMath::Max(1, FPlatformString::Atoi(AttributeValue));
             }
         }
+    } else if (ParsingState == ParsingState::Relation) {
+        if (!FCString::Stricmp(AttributeName, TEXT("id"))) {
+            CurrentRelationInfo->RelationID = FString(AttributeValue);
+        }
+    } else if (ParsingState == ParsingState::Rel_Member) {
+        if (!FCString::Stricmp(AttributeName, TEXT("type"))) {
+            CurrentRelMember->Type = AttributeValue;
+        } else if (!FCString::Stricmp(AttributeName, TEXT("ref"))) {
+            CurrentRelMember->Ref = AttributeValue;
+        } if (!FCString::Stricmp(AttributeName, TEXT("role"))) {
+            UE_LOG(LogTemp,Warning,TEXT("OSMFileParser: Relation Member Role: %s"), AttributeValue)
+            CurrentRelMember->bIsInner = FCString::Stricmp(AttributeValue, TEXT("inner")) == 0 ? 1 : 0;
+        }
+    } else if (ParsingState == ParsingState::Rel_Tag) {
+        if (!FCString::Stricmp(AttributeName, TEXT("k"))) {
+            CurrentRelTagKey = AttributeValue;
+        } else if (!FCString::Stricmp(AttributeName, TEXT("v"))) {
+            if (!FCString::Stricmp(CurrentRelTagKey, TEXT("building"))) {
+                EOSMBuildingType BuildingType;
+                DecodeBuildingType(AttributeValue, BuildingType);
+                CurrentRelationInfo->BuildingType = BuildingType;
+            } else if (!FCString::Stricmp(CurrentRelTagKey, TEXT("building:levels"))) {
+                CurrentRelationInfo->BuildingLevels = FPlatformString::Atoi(AttributeValue);
+            } else if (!FCString::Stricmp(CurrentRelTagKey, TEXT("height"))) {
+                if (!FString(AttributeValue).Contains(TEXT(" "))) {
+                    // Okay, no space character.  So this has got to be a floating point number.  The OSM
+                    // spec says that the height values are in meters.
+                    CurrentRelationInfo->Height = FPlatformString::Atod(AttributeValue);
+                } else {
+                    // Looks like the height value contains units of some sort.
+                    // @todo: Add support for interpreting unit strings and converting the values
+                }
+            }
+        }
     }
 
     return true;
@@ -426,22 +281,246 @@ bool FOSMFile::ProcessAttribute(const TCHAR * AttributeName, const TCHAR * Attri
 
 bool FOSMFile::ProcessClose(const TCHAR * Element) {
     if (ParsingState == ParsingState::Node) {
-        NodeMap.Add(CurrentNodeID, CurrentNodeInfo);
-        CurrentNodeID = 0;
+        NodeMap.Add(CurrentNodeInfo->NodeID, CurrentNodeInfo);
         CurrentNodeInfo = nullptr;
-
         ParsingState = ParsingState::Root;
     } else if (ParsingState == ParsingState::Way) {
         Ways.Add(CurrentWayInfo);
+        WayMap.Add(CurrentWayInfo->WayID, CurrentWayInfo);
         CurrentWayInfo = nullptr;
-
         ParsingState = ParsingState::Root;
     } else if (ParsingState == ParsingState::Way_NodeRef) {
         ParsingState = ParsingState::Way;
     } else if (ParsingState == ParsingState::Way_Tag) {
         CurrentWayTagKey = TEXT("");
         ParsingState = ParsingState::Way;
+    } else if (ParsingState == ParsingState::Relation) {
+        Relations.Add(CurrentRelationInfo);
+        CurrentRelationInfo = nullptr;
+        ParsingState = ParsingState::Root;
+    } else if (ParsingState == ParsingState::Rel_Member) {
+        // only interested in relations of type way for now
+        if(CurrentRelMember->Type.Equals(TEXT("way"))){
+            CurrentRelationInfo->Members.Add(CurrentRelMember);
+        }
+        CurrentRelMember = nullptr;
+        ParsingState = ParsingState::Relation;
+    } else if(ParsingState == ParsingState::Rel_Tag) {
+        CurrentRelTagKey = TEXT("");
+        ParsingState = ParsingState::Relation;
     }
 
     return true;
+}
+
+void FOSMFile::DecodeWayType(const TCHAR* AttributeValue, EOSMWayType& WayType)
+{
+    WayType = EOSMWayType::OtherRoad;
+
+    if (!FCString::Stricmp(AttributeValue, TEXT("motorway"))) {
+        WayType = EOSMWayType::Motorway;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("motorway_link"))) {
+        WayType = EOSMWayType::Motorway_Link;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("trunk"))) {
+        WayType = EOSMWayType::Trunk;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("trunk_link"))) {
+        WayType = EOSMWayType::Trunk_Link;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("primary"))) {
+        WayType = EOSMWayType::Primary;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("primary_link"))) {
+        WayType = EOSMWayType::Primary_Link;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("secondary"))) {
+        WayType = EOSMWayType::Secondary;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("secondary_link"))) {
+        WayType = EOSMWayType::Secondary_Link;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("tertiary"))) {
+        WayType = EOSMWayType::Tertiary;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("tertiary_link"))) {
+        WayType = EOSMWayType::Tertiary_Link;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("residential"))) {
+        WayType = EOSMWayType::ResidentialRoad;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("service"))) {
+        WayType = EOSMWayType::ServiceRoad;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("unclassified"))) {
+        WayType = EOSMWayType::UnclassifiedRoad;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("living_street"))) {
+        WayType = EOSMWayType::Living_Street;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("pedestrian"))) {
+        WayType = EOSMWayType::Pedestrian;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("track"))) {
+        WayType = EOSMWayType::Track;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("bus_guideway"))) {
+        WayType = EOSMWayType::Bus_Guideway;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("raceway"))) {
+        WayType = EOSMWayType::Raceway;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("road"))) {
+        WayType = EOSMWayType::Road;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("footway"))) {
+        WayType = EOSMWayType::Footway;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("cycleway"))) {
+        WayType = EOSMWayType::Cycleway;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("bridleway"))) {
+        WayType = EOSMWayType::Bridleway;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("steps"))) {
+        WayType = EOSMWayType::Steps;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("path"))) {
+        WayType = EOSMWayType::Path;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("proposed"))) {
+        WayType = EOSMWayType::Proposed;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("construction"))) {
+        WayType = EOSMWayType::RoadConstruction;
+    } else {
+        // Other type that we don't recognize yet.  See http://wiki.openstreetmap.org/wiki/Key:highway
+    }
+}
+
+void FOSMFile::DecodeBuildingType(const TCHAR* AttributeValue, EOSMBuildingType& BuildingType)
+{
+    BuildingType = EOSMBuildingType::OtherBuilding;
+
+    if (!FCString::Stricmp(AttributeValue, TEXT("yes"))) {
+        BuildingType = EOSMBuildingType::OtherBuilding;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("apartments"))) {
+        BuildingType = EOSMBuildingType::Apartments;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("bungalow"))) {
+        BuildingType = EOSMBuildingType::Bungalow;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("cabin"))) {
+        BuildingType = EOSMBuildingType::Cabin;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("detached"))) {
+        BuildingType = EOSMBuildingType::Detached;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("dormitory"))) {
+        BuildingType = EOSMBuildingType::Dormitory;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("farm"))) {
+        BuildingType = EOSMBuildingType::Farm;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("ger"))) {
+        BuildingType = EOSMBuildingType::Ger;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("hotel"))) {
+        BuildingType = EOSMBuildingType::Hotel;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("house"))) {
+        BuildingType = EOSMBuildingType::House;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("houseboat"))) {
+        BuildingType = EOSMBuildingType::Houseboat;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("residential"))) {
+        BuildingType = EOSMBuildingType::ResidentialBuilding;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("semidetached_house"))) {
+        BuildingType = EOSMBuildingType::SemiDetachedHouse;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("static_caravan"))) {
+        BuildingType = EOSMBuildingType::StaticCaravan;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("terrace"))) {
+        BuildingType = EOSMBuildingType::Terrace;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("commercial"))) {
+        BuildingType = EOSMBuildingType::CommercialBuilding;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("industrial"))) {
+        BuildingType = EOSMBuildingType::IndustrialBuilding;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("kiosk"))) {
+        BuildingType = EOSMBuildingType::Kiosk;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("office"))) {
+        BuildingType = EOSMBuildingType::Office;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("retail"))) {
+        BuildingType = EOSMBuildingType::Retail;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("supermarket"))) {
+        BuildingType = EOSMBuildingType::Supermarket;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("warehouse"))) {
+        BuildingType = EOSMBuildingType::Warehouse;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("cathedral"))) {
+        BuildingType = EOSMBuildingType::Cathedral;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("chapel"))) {
+        BuildingType = EOSMBuildingType::Chapel;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("church"))) {
+        BuildingType = EOSMBuildingType::Church;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("mosque"))) {
+        BuildingType = EOSMBuildingType::Mosque;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("religious"))) {
+        BuildingType = EOSMBuildingType::Religious;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("shrine"))) {
+        BuildingType = EOSMBuildingType::Shrine;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("synagogue"))) {
+        BuildingType = EOSMBuildingType::Synagogue;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("temple"))) {
+        BuildingType = EOSMBuildingType::Temple;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("bakehouse"))) {
+        BuildingType = EOSMBuildingType::Bakehouse;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("civic"))) {
+        BuildingType = EOSMBuildingType::Civic;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("fire_station"))) {
+        BuildingType = EOSMBuildingType::FireStation;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("government"))) {
+        BuildingType = EOSMBuildingType::Government;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("hospital"))) {
+        BuildingType = EOSMBuildingType::Hospital;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("kindergarten"))) {
+        BuildingType = EOSMBuildingType::Kindergarten;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("public"))) {
+        BuildingType = EOSMBuildingType::PublicBuilding;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("school"))) {
+        BuildingType = EOSMBuildingType::School;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("toilets"))) {
+        BuildingType = EOSMBuildingType::Toilets;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("train_station"))) {
+        BuildingType = EOSMBuildingType::TrainStation;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("transportation"))) {
+        BuildingType = EOSMBuildingType::Transportation;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("university"))) {
+        BuildingType = EOSMBuildingType::University;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("barn"))) {
+        BuildingType = EOSMBuildingType::Barn;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("conservatory"))) {
+        BuildingType = EOSMBuildingType::Conservatory;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("cowshed"))) {
+        BuildingType = EOSMBuildingType::Cowshed;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("farm_auxiliary"))) {
+        BuildingType = EOSMBuildingType::FarmAuxiliary;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("greenhouse"))) {
+        BuildingType = EOSMBuildingType::Greenhouse;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("stable"))) {
+        BuildingType = EOSMBuildingType::Stable;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("sty"))) {
+        BuildingType = EOSMBuildingType::Sty;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("grandstand"))) {
+        BuildingType = EOSMBuildingType::Grandstand;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("pavilion"))) {
+        BuildingType = EOSMBuildingType::Pavilion;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("riding_hall"))) {
+        BuildingType = EOSMBuildingType::RidingHall;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("sports_hall"))) {
+        BuildingType = EOSMBuildingType::SportsHall;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("stadium"))) {
+        BuildingType = EOSMBuildingType::Stadium;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("hangar"))) {
+        BuildingType = EOSMBuildingType::Hangar;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("hut"))) {
+        BuildingType = EOSMBuildingType::Hut;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("shed"))) {
+        BuildingType = EOSMBuildingType::Shed;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("carport"))) {
+        BuildingType = EOSMBuildingType::Carport;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("garage"))) {
+        BuildingType = EOSMBuildingType::Garage;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("garages"))) {
+        BuildingType = EOSMBuildingType::Garages;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("parking"))) {
+        BuildingType = EOSMBuildingType::Parking;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("digester"))) {
+        BuildingType = EOSMBuildingType::Digester;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("service"))) {
+        BuildingType = EOSMBuildingType::ServiceBuilding;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("transformer_tower"))) {
+        BuildingType = EOSMBuildingType::TransformerTower;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("water_tower"))) {
+        BuildingType = EOSMBuildingType::WaterTower;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("bunker"))) {
+        BuildingType = EOSMBuildingType::Bunker;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("bridge"))) {
+        BuildingType = EOSMBuildingType::Bridge;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("construction"))) {
+        BuildingType = EOSMBuildingType::BuildingConstruction;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("roof"))) {
+        BuildingType = EOSMBuildingType::Roof;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("ruins"))) {
+        BuildingType = EOSMBuildingType::Ruins;
+    } else if (!FCString::Stricmp(AttributeValue, TEXT("tree_house"))) {
+        BuildingType = EOSMBuildingType::TreeHouse;
+    } else {
+        // Other type that we don't recognize yet.  See http://wiki.openstreetmap.org/wiki/Key:building
+    }
 }

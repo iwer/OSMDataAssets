@@ -5,11 +5,11 @@
 #include "OSMDataAsset.h"
 #include "OSMFileParser.h"
 UOSMDataAssetFactory::UOSMDataAssetFactory( const FObjectInitializer& ObjectInitializer )
-	: Super(ObjectInitializer)
+    : Super(ObjectInitializer)
 {
     SupportedClass = UOSMDataAsset::StaticClass();
-	bCreateNew = false;
-	bEditorImport = true;
+    bCreateNew = false;
+    bEditorImport = true;
     Formats.Add(TEXT("osm;OSM File"));
 }
 
@@ -24,35 +24,74 @@ UObject * UOSMDataAssetFactory::FactoryCreateFile(UClass* InClass,
 {
     UOSMDataAsset* Asset = NewObject<UOSMDataAsset>(InParent, InClass, InName, Flags);
 
-    FString file = Filename;
-    FOSMFile parser;
-    if(parser.LoadOpenStreetMapFile(file, false, Warn))
+    FString File = Filename;
+    FOSMFile Parser;
+    if(Parser.LoadOpenStreetMapFile(File, false, Warn))
     {
-        UE_LOG(LogTemp, Warning, TEXT("UOSMDataAssetFactory: %d Ways"), parser.Ways.Num())
-        for(auto way : parser.Ways) {
-            if (way) {
-                FBuildingData building;
-                building.BuildingType = way->BuildingType;
-                building.Height = way->Height;
-                building.Levels = way->Levels;
-                UE_LOG(LogTemp, Warning, TEXT("UOSMDataAssetFactory: %d Nodes"), way->Nodes.Num())
-                
-                //for(FOSMFile::FOSMNodeInfo* node : way->Nodes){
-                for(int i = 0; i < way->Nodes.Num(); i++) {
-                    double lat = way->Nodes[i]->Latitude;
-                    double lon = way->Nodes[i]->Longitude;
+        UE_LOG(LogTemp, Warning, TEXT("UOSMDataAssetFactory: %d Relations"), Parser.Relations.Num())
+        for(const auto Rel : Parser.Relations) {
+            FMPBuildingData Building;
+            Building.ID = Rel->RelationID;
+            Building.BuildingType = Rel->BuildingType;
+            Building.Levels = Rel->BuildingLevels;
+            Building.Height = Rel->Height;
+            Building.bHasHole = 0;
+            UE_LOG(LogTemp,Warning,TEXT("UOSMDataAssetFactory: %d MPolygons"), Rel->Members.Num())
+            for (auto m : Rel->Members){
+                FMPBuildingPart Part;
+                Part.bIsInner = m->bIsInner;
+                if(Part.bIsInner==1)
+                    Building.bHasHole=1;
+                auto WayID = m->Ref;
+                FOSMFile::FOSMWayInfo * Way = Parser.WayMap.FindRef(WayID);
+                UE_LOG(LogTemp, Warning, TEXT("UOSMDataAssetFactory: %d Nodes"), Way->Nodes.Num())
+                for(int i = 0; i < Way->Nodes.Num(); i++) {
+                    const double Lat = Way->Nodes[i]->Latitude;
+                    const double Lon = Way->Nodes[i]->Longitude;
 
-                    FVector location = FVector(lon, lat, 0);
+                    FVector Location = FVector(Lon, Lat, 0);
 
                     // sometimes shapes are closed of with the first point, we dont need that
-                    if(i == way->Nodes.Num() - 1
-                        && location.Equals(building.PolygonPoints[0]))
+                    if(i == Way->Nodes.Num() - 1
+                        && Location.Equals(Part.PolygonPoints[0]))
                     {
                         break;
                     }
-                    building.PolygonPoints.Add(location);
+                    Part.PolygonPoints.Add(Location);
                 }
-                Asset->Buildings.Add(building);
+                Building.Parts.Add(Part);
+                Parser.WayMap.Remove(WayID);
+                Parser.Ways.Remove(Way);
+            }
+            Asset->MultiPolygonBuildings.Add(Building);
+        }
+
+        UE_LOG(LogTemp, Warning, TEXT("UOSMDataAssetFactory: %d Ways"), Parser.Ways.Num())
+        for(const auto Way : Parser.Ways) {
+            if (Way) {
+                FBuildingData Building;
+                Building.ID = Way->WayID;
+                Building.BuildingType = Way->BuildingType;
+                Building.Height = Way->Height;
+                Building.Levels = Way->Levels;
+                UE_LOG(LogTemp, Warning, TEXT("UOSMDataAssetFactory: %d Nodes"), Way->Nodes.Num())
+
+                //for(FOSMFile::FOSMNodeInfo* node : way->Nodes){
+                for(int i = 0; i < Way->Nodes.Num(); i++) {
+                    const double Lat = Way->Nodes[i]->Latitude;
+                    const double Lon = Way->Nodes[i]->Longitude;
+
+                    FVector Location = FVector(Lon, Lat, 0);
+
+                    // sometimes shapes are closed of with the first point, we dont need that
+                    if(i == Way->Nodes.Num() - 1
+                        && Location.Equals(Building.PolygonPoints[0]))
+                    {
+                        break;
+                    }
+                    Building.PolygonPoints.Add(Location);
+                }
+                Asset->Buildings.Add(Building);
             } else
             {
                 UE_LOG(LogTemp, Warning, TEXT("UOSMDataAssetFactory: Invalid Way"))
@@ -60,7 +99,7 @@ UObject * UOSMDataAssetFactory::FactoryCreateFile(UClass* InClass,
         }
     } else
     {
-        UE_LOG(LogTemp, Error, TEXT("UOSMDataAssetFactory: Failed to parse osm file %s"), *file)
+        UE_LOG(LogTemp, Error, TEXT("UOSMDataAssetFactory: Failed to parse osm file %s"), *File)
     }
 
     return Asset;
